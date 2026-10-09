@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-appleremote"
+version = "0.1.0"
+description = "Linux support for the gen-1 Apple Siri Remote: touch, buttons, tvOS-style gestures and a virtual keyboard"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+dependencies = []
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
+
+[project.scripts]
+appleremote = "appleremote.__main__:main"
+
+[tool.setuptools]
+packages = ["appleremote"]
+
+[tool.setuptools.package-data]
+appleremote = ["lab.html"]

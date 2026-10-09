@@ -1,0 +1,113 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Siri Remote lab</title>
+<style>
+:root{--bg:#0b0b0d;--card:#18181b;--line:#2a2a2f;--dim:#8e8e96;--acc:#0a84ff;--hot:#30d158}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#f2f2f7;font:15px/1.4 system-ui,-apple-system,sans-serif;padding:20px}
+h1{font-size:22px;margin:0 0 4px}.sub{color:var(--dim);margin:0 0 16px}
+.grid{display:grid;grid-template-columns:minmax(300px,420px) minmax(0,1fr);gap:16px}@media(max-width:860px){.grid{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin:0 0 10px}
+#pad{width:100%;aspect-ratio:1;border-radius:22px;background:radial-gradient(circle at 50% 30%,#2c2c30,#141417);display:block}
+.bits{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.bit{border-radius:8px;background:#232328;padding:8px 0;text-align:center;font:12px ui-monospace,monospace;color:var(--dim);transition:background .08s}
+.bit.on{background:var(--hot);color:#000;font-weight:700}
+#bytes{display:flex;flex-wrap:wrap;gap:4px;font:12px ui-monospace,monospace}#bytes span{min-width:38px;text-align:center;padding:5px 2px;border-radius:6px;background:#232328}
+#bytes span.ch{background:var(--acc);color:#fff}#bytes small{display:block;color:var(--dim);font-size:9px}
+#log{height:300px;overflow:auto;font:12px/1.5 ui-monospace,monospace;white-space:pre;color:#c7c7cc}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}button{font:inherit;border:0;border-radius:10px;padding:8px 12px;background:#2c2c31;color:#fff;cursor:pointer}button:hover{background:#3a3a40}
+.pill{padding:4px 10px;border-radius:999px;background:#232328;color:var(--dim);font-size:13px}.pill.ok{color:var(--hot)}
+#feel{margin-bottom:16px}#row{position:relative;height:250px;overflow:hidden;perspective:900px}
+#row .t{position:absolute;top:56px;width:220px;height:132px;border-radius:18px;display:grid;place-items:center;text-align:center;padding:0 14px;
+  font-weight:800;font-size:25px;line-height:1.1;color:#fff;transform-style:preserve-3d;box-shadow:0 10px 24px rgba(0,0,0,.5);
+  transition:left .24s cubic-bezier(.2,.8,.2,1),transform .16s cubic-bezier(.2,.8,.2,1),box-shadow .2s}
+#row .t.f{transform:scale(1.2) rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg));box-shadow:0 34px 70px rgba(0,0,0,.75);z-index:2}
+#row .t.f::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:radial-gradient(circle at var(--gx,50%) var(--gy,25%),rgba(255,255,255,.38),transparent 58%)}
+#row.fast .t{transition-duration:.11s}#row.touch .t.f{box-shadow:0 40px 80px rgba(0,0,0,.8),0 0 0 3px rgba(255,255,255,.55)}
+</style></head><body>
+<h1>Siri Remote lab</h1><p class="sub">Every report your remote sends, decoded live. Touch, swipe, click and press: the pad, the button lights and the bytes follow.</p>
+<div class="row" style="margin:0 0 14px"><span class="pill" id="st">connecting…</span><span class="pill" id="cnt">0 reports</span><span class="pill" id="rate">0/s</span><button id="clr">Clear trail</button></div>
+<div class="card" id="feel"><h2>Feel test: rest, slide, flick and click on the remote</h2><div id="row"></div>
+<div class="row"><span class="pill" id="gst">waiting for a touch</span><span class="pill" id="glast">–</span></div></div>
+<div class="grid">
+<div class="card"><h2>Touch surface (decoded, scaled to what you've touched)</h2><canvas id="pad" width="800" height="800"></canvas>
+<div class="row"><span class="pill" id="xy">–</span><span class="pill" id="state">state –</span><span class="pill" id="nf">fingers –</span></div></div>
+<div style="display:grid;gap:16px;align-content:start;min-width:0">
+<div class="card"><h2>Buttons (byte 2 of every report)</h2><div class="bits" id="bits"></div><div class="row"><span class="pill" id="btn">no press yet</span></div></div>
+<div class="card"><h2>Latest report bytes (changed bytes in blue)</h2><div id="bytes"></div></div>
+<div class="card"><h2>Raw log</h2><div id="log"></div></div></div></div>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), pad=$('pad'), g=pad.getContext('2d');
+const BITS=['TV','Vol +','Vol −','Play/Pause','Siri','Menu','bit 6','Click'];
+const LABEL={tv:'TV / Home',volup:'Volume +',voldown:'Volume −',playpause:'Play/Pause',siri:'Siri',menu:'Menu',click:'Click'};
+const STATES=['gone','start','hover','make','touching','break','linger','lifted'];
+BITS.forEach(n=>{const b=document.createElement('div');b.className='bit';b.textContent=n;$('bits').append(b);});
+let n=0, prev=null, trail=[], dots=[], times=[], rx=[1e9,-1e9], ry=[1e9,-1e9], lastTouch=null;
+$('clr').onclick=()=>{trail=[];dots=[];draw();};
+function log(s){const l=$('log');l.textContent=s+'\n'+l.textContent.slice(0,20000);}
+const sc=(x,y)=>[40+(x-rx[0])/((rx[1]-rx[0])||1)*720, 40+(ry[1]-y)/((ry[1]-ry[0])||1)*720];
+function draw(){g.clearRect(0,0,800,800);g.strokeStyle='rgba(255,255,255,.06)';for(let i=1;i<4;i++){g.beginPath();g.moveTo(i*200,0);g.lineTo(i*200,800);g.moveTo(0,i*200);g.lineTo(800,i*200);g.stroke();}
+  g.lineWidth=6;g.lineCap='round';for(let i=1;i<trail.length;i++){if(!trail[i]||!trail[i-1])continue;g.strokeStyle=`rgba(10,132,255,${i/trail.length})`;g.beginPath();g.moveTo(...trail[i-1]);g.lineTo(...trail[i]);g.stroke();}
+  g.fillStyle='#fff';dots.forEach(p=>{g.beginPath();g.arc(p[0],p[1],18,0,7);g.fill();});}
+function onReport(ev){
+  n++; $('cnt').textContent=n+' reports'; const now=performance.now(); times.push(now); times=times.filter(t=>now-t<1000); $('rate').textContent=times.length+'/s';
+  const a=ev.hex.match(/../g).map(h=>parseInt(h,16)); log(new Date().toLocaleTimeString()+'  len='+String(a.length).padStart(3)+'  '+ev.hex.replace(/(..)/g,'$1 '));
+  $('bytes').innerHTML=a.map((b,i)=>`<span class="${prev&&prev.length===a.length&&prev[i]!==b?'ch':''}"><small>${i}</small>${b.toString(16).padStart(2,'0')}<small>${b}</small></span>`).join(''); prev=a;}
+function onTouch(ev){
+  const s=ev.fingers.length?ev.fingers[0][2]:0;
+  $('state').textContent='state '+s+' · '+STATES[s]; $('nf').textContent='fingers '+ev.fingers.length;
+  if(!ev.down){ if(trail.length&&trail[trail.length-1])trail.push(null); dots=[]; draw(); return; }
+  ev.fingers.forEach(([x,y])=>{rx=[Math.min(rx[0],x),Math.max(rx[1],x)]; ry=[Math.min(ry[0],y),Math.max(ry[1],y)];});
+  $('xy').textContent=`x ${ev.x} (${rx[0]}..${rx[1]})  y ${ev.y} (${ry[0]}..${ry[1]})`;
+  lastTouch={px:(ev.x-rx[0])/((rx[1]-rx[0])||1), py:(ry[1]-ev.y)/((ry[1]-ry[0])||1)};
+  trail.push(sc(ev.x,ev.y)); if(trail.length>200)trail.shift(); dots=ev.fingers.map(([x,y])=>sc(x,y)); draw();}
+function onButtons(ev){
+  [...$('bits').children].forEach((e,i)=>e.classList.toggle('on',!!(ev.mask>>i&1)));
+  $('btn').textContent=ev.mask?'held: '+ev.mask.toString(2).padStart(8,'0')+' (0x'+ev.mask.toString(16).padStart(2,'0')+')':'released';
+  ev.pressed.forEach(p=>{ $('glast').textContent=LABEL[p]||p;
+    if(p==='click'){ const q=lastTouch||{px:.5,py:.4}; firework(q.px,q.py);
+      rowEl.children[fi].animate([{scale:1.2},{scale:1.06},{scale:1.2}],{duration:220,easing:'ease-out'}); } });}
+// --- feel test: the gesture engine's output on a tvOS-style row ---
+const TILES=[['Movies','#ff375f'],['TV Shows','#bf5af2'],['Music','#ff9f0a'],['Photos','#30d158'],['Podcasts','#5e5ce6'],
+  ['Games','#ff453a'],['Radio','#64d2ff'],['Sports','#ffd60a'],['Library','#0a84ff'],['Settings','#8e8e93']];
+const rowEl=$('row'); let fi=1;
+TILES.forEach(([n,c])=>{const d=document.createElement('div');d.className='t';d.style.background=`linear-gradient(140deg,${c},#121214 88%)`;d.textContent=n;rowEl.append(d);});
+function layoutRow(){const W=rowEl.clientWidth||1200,w=220,gap=40,x0=W/2-w/2-fi*(w+gap);[...rowEl.children].forEach((d,i)=>{d.style.left=(x0+i*(w+gap))+'px';d.classList.toggle('f',i===fi);if(i!==fi){d.style.removeProperty('--rx');d.style.removeProperty('--ry');}});}
+const nudge=(dx,dy)=>rowEl.children[fi].animate([{translate:'0 0'},{translate:`${dx}px ${dy}px`},{translate:'0 0'}],{duration:240,easing:'ease-out'});
+function feelMove(d,src){ if(d==='left'||d==='right'){const n=Math.max(0,Math.min(TILES.length-1,fi+(d==='right'?1:-1))); if(n===fi) nudge(d==='right'?16:-16,0); fi=n;}
+  else nudge(0,d==='up'?-14:14); rowEl.classList.toggle('fast',src==='flick'); layoutRow(); }
+function feelTilt(x,y){const f=rowEl.children[fi]; f.style.setProperty('--ry',(x*12)+'deg'); f.style.setProperty('--rx',(y*9)+'deg');
+  f.style.setProperty('--gx',(50+x*38)+'%'); f.style.setProperty('--gy',(28-y*26)+'%');}
+addEventListener('resize',layoutRow); layoutRow();
+// --- 3D firework on a click: a rocket, then a sphere of sparks in perspective, slowly turning, with gravity and glowing trails ---
+const fwc=document.createElement('canvas'); fwc.style.cssText='position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;z-index:50';
+document.documentElement.append(fwc); const fx=fwc.getContext('2d'); let parts=[], rockets=[], fwT=0, fwOn=false;
+function fwSize(){fwc.width=innerWidth*devicePixelRatio; fwc.height=innerHeight*devicePixelRatio; fx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);} fwSize(); addEventListener('resize',fwSize);
+function firework(px,py){ const W=innerWidth,H=innerHeight,x=W*(.12+.76*px),y=H*(.14+.46*py),hue=Math.random()*360;
+  rockets.push({x,y,y0:H+30,t:0,dur:.5+Math.random()*.15,hue}); if(!fwOn){fwOn=true;fwT=performance.now();requestAnimationFrame(fwFrame);} }
+function burst(x,y,hue){ for(let i=0;i<230;i++){const u=Math.random()*2-1,th=Math.random()*6.2832,r=Math.sqrt(1-u*u),sp=230+Math.random()*170,core=i<50;
+    parts.push({cx:x,cy:y,x:0,y:0,z:0,vx:r*Math.cos(th)*sp*(core?.45:1),vy:u*sp*(core?.45:1),vz:r*Math.sin(th)*sp*(core?.45:1),life:1,
+      decay:(core?.9:.5)+Math.random()*.3,hue:core?48:hue+(Math.random()*44-22),light:core?82:60,tw:Math.random()*6.28});} }
+function fwFrame(now){ const dt=Math.min(.05,(now-fwT)/1000); fwT=now; const W=innerWidth,H=innerHeight;
+  fx.globalCompositeOperation='destination-out'; fx.fillStyle='rgba(0,0,0,.24)'; fx.fillRect(0,0,W,H); fx.globalCompositeOperation='lighter';
+  rockets=rockets.filter(r=>{r.t+=dt; const k=Math.min(1,r.t/r.dur),e=1-(1-k)**3,y=r.y0+(r.y-r.y0)*e;
+    fx.fillStyle=`hsla(${r.hue},100%,78%,.95)`; fx.beginPath(); fx.arc(r.x+Math.sin(r.t*40)*1.4,y,2.8,0,6.2832); fx.fill();
+    if(k>=1){burst(r.x,r.y,r.hue); return false;} return true;});
+  const F=620,a=now/1000*.55,ca=Math.cos(a),sa=Math.sin(a),drag=Math.pow(.4,dt);
+  parts=parts.filter(p=>{p.vy+=150*dt; p.vx*=drag; p.vy*=drag; p.vz*=drag; p.x+=p.vx*dt; p.y+=p.vy*dt; p.z+=p.vz*dt; p.life-=p.decay*dt;
+    if(p.life<=0) return false; const X=p.x*ca+p.z*sa,Z=-p.x*sa+p.z*ca,s=F/(F+Z),tw=.6+.4*Math.sin(now/55+p.tw);
+    fx.fillStyle=`hsla(${p.hue},100%,${p.light+18*tw}%,${Math.min(1,p.life*1.4)*tw})`; fx.beginPath();
+    fx.arc(p.cx+X*s,p.cy+p.y*s,Math.max(.7,2.6*s*(.4+.6*p.life)),0,6.2832); fx.fill(); return true;});
+  if(parts.length||rockets.length) requestAnimationFrame(fwFrame); else {fwOn=false; fx.clearRect(0,0,W,H);} }
+function onGesture(ev){ const t=ev.type;
+  if(t==='move'){feelMove(ev.dir,ev.src); $('glast').textContent=`${ev.src} ${ev.dir}`;}
+  else if(t==='tilt') feelTilt(ev.x,ev.y);
+  else if(t==='touch'){rowEl.classList.toggle('touch',!!ev.down); $('gst').textContent=ev.down?'touching':'lifted';} }
+const es=new EventSource('/events');
+es.onmessage=e=>{const ev=JSON.parse(e.data);
+  if(ev.kind==='report') onReport(ev); else if(ev.kind==='touch') onTouch(ev); else if(ev.kind==='buttons') onButtons(ev);
+  else if(ev.kind==='gesture') onGesture(ev);
+  else if(ev.kind==='info'){ log('· '+ev.text); $('st').textContent=ev.text.length>60?ev.text.slice(0,57)+'…':ev.text; $('st').className=/^(connected|replaying)/.test(ev.text)?'pill ok':'pill'; } };
+es.onerror=()=>{$('st').textContent='lab offline';$('st').className='pill';};
+draw();
+</script></body></html>

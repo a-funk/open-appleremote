@@ -1,0 +1,21 @@
+# Example systemd user unit: the remote as a keyboard, from login (or boot, with lingering) on.
+#
+# Install:  mkdir -p ~/.config/systemd/user && cp systemd/appleremote-keys.service ~/.config/systemd/user/
+#           systemctl --user daemon-reload && systemctl --user enable --now appleremote-keys
+# Logs:     journalctl --user -u appleremote-keys -f
+# Needs access to the remote and to /dev/uinput: see udev/71-appleremote.rules.
+
+[Unit]
+Description=Apple Siri Remote as a keyboard (open-appleremote)
+
+[Service]
+# Where you cloned open-appleremote. After `pip install .` this line can go.
+WorkingDirectory=%h/open-appleremote
+ExecStart=/usr/bin/python3 -m appleremote keys
+# With your own key map:
+#ExecStart=/usr/bin/python3 -m appleremote keys --map %h/.config/appleremote/keys.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

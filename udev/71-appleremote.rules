@@ -1,0 +1,21 @@
+# open-appleremote: let the logged-in user read the gen-1 Siri Remote, no root needed.
+#
+# Install:  sudo cp udev/71-appleremote.rules /etc/udev/rules.d/
+#           sudo udevadm control --reload && sudo udevadm trigger
+# then press a button on the remote so its node is created again under the new rule.
+#
+# BlueZ creates the remote's HID device as BUS:VENDOR:PRODUCT.N in upper-case hex, e.g. 0005:004C:026D.0003
+# (Bluetooth, Apple, gen-1 Siri Remote); its hidraw node is a child of that device. uaccess gives the user on the
+# local seat (the desktop session) access, and must run before 73-seat-late.rules, hence the 71.
+SUBSYSTEM=="hidraw", KERNELS=="0005:004C:026D.*", TAG+="uaccess"
+
+# Optional, only to run `appleremote keys` as your user: let the seat user create virtual input devices.
+# Any program you run can then type keystrokes; Steam's controller rules ship the same line.
+#KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
+
+# Headless (no desktop session, e.g. a systemd user service on a lingering account): uaccess needs a seat, so use a
+# group of its own instead of the lines above (not "input": its members can read every keyboard), then log in again:
+#   sudo groupadd --system appleremote && sudo usermod -aG appleremote "$USER"
+# Members can then type keystrokes through uinput, as with the optional line above.
+#SUBSYSTEM=="hidraw", KERNELS=="0005:004C:026D.*", GROUP="appleremote", MODE="0660"
+#KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="appleremote", MODE="0660", OPTIONS+="static_node=uinput"
