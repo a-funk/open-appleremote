@@ -183,8 +183,9 @@ audio reports: they carry the speaker's voice.
   - To try it without a config change: `bluetoothctl power off`, `sudo btmgmt privacy off`, `bluetoothctl power on`
     (lasts until the next restart).
   - Re-pair once afterwards if the remote stored the old address.
-  - With privacy off and the remote paired again, its link dropped, it sat idle for 10 minutes, and one button press
-    reconnected it; btmon shows the host connecting from its public address. **Measured** (once so far)
+  - With privacy off and the remote paired again, a button press reconnected it 3 times out of 3 in 40 minutes: once
+    after its link was dropped, and twice after it fell asleep on its own. btmon shows the host connecting from its
+    public address. **Measured**
 - On a MediaTek MT7925 controller the kernel logs "ACL packet for unknown connection handle 3837". It is a firmware
   debug event and harmless. **Reported**
 
