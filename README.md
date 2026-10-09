@@ -9,9 +9,9 @@ Paired with Linux, the remote does nothing: BlueZ exposes it only as a raw `/dev
 report map, and it stays silent until it is unlocked. This package unlocks it, decodes its reports, and turns them
 into events, gestures or key presses. [docs/PROTOCOL.md](docs/PROTOCOL.md) documents everything it sends.
 
-Status: 0.1.0, an early release. Decoding, gestures and the lab are verified against real captures from an A1962 on
-Linux; the live device loop, the uinput keyboard and the udev rule have not been re-run on hardware since they were
-extracted. Reports are welcome (see [CHANGELOG.md](CHANGELOG.md)).
+Status: 0.1.0, an early release, tested on an A1962 with Linux: finding, unlocking and reading the remote as a normal
+user, and reconnecting after it sleeps. The virtual keyboard (`keys`) is not hardware-tested yet. Reports are welcome
+(see [CHANGELOG.md](CHANGELOG.md)).
 
 ## Quick start
 
@@ -142,7 +142,8 @@ The gesture engine's feel (step size, pacing, flick speed, coasting) is set by t
 ## Supported and tested
 
 - **Tested**: Siri Remote gen 1, model A1962, on BlueZ 5.72, Linux 6.17 (arm64, MediaTek MT7925 Bluetooth). The
-  live code paths of this extraction get one more run there before 0.1.0 ships (see the changelog).
+  0.1.0 code passed there: `list`, `monitor` and `lab` as a normal user through the udev rule, and the reconnect
+  after sleep once LE privacy is off. The virtual keyboard (`keys`) isn't hardware-tested yet.
 - **Should work, untested**: the A1513 (the original gen-1 remote, which the A1962 is a variant of) and other Linux
   machines with a recent BlueZ. Reports welcome.
 - **Not supported yet**: Siri Remote gen 2 and gen 3. Per the prior art they use other report IDs and another

@@ -176,13 +176,15 @@ audio reports: they carry the speaker's voice.
   press reconnects it, but after a long sleep the press that wakes it may be lost. **Reported**
 - **Reconnect fails when BlueZ uses LE privacy.** With `Privacy = device` (or any LE privacy) in
   `/etc/bluetooth/main.conf`, the host connects from a rotating resolvable private address, and every wake ends in
-  HCI Disconnect `0x3E`, "Connection Failed to be Established", in a tight retry loop. **Reported**. Why: the remote
-  (Bluetooth 4.0) probably can't resolve that address. **Guess**
+  HCI Disconnect `0x3E`, "Connection Failed to be Established", in a tight retry loop: 46 of 47 connection attempts
+  in a btmon capture (MediaTek MT7925, BlueZ 5.72). **Measured**. Why: the remote (Bluetooth 4.0) probably can't
+  resolve that address. **Guess**
   - Fix: `Privacy = off` in the `[General]` section of `/etc/bluetooth/main.conf`, then restart bluetooth.
   - To try it without a config change: `bluetoothctl power off`, `sudo btmgmt privacy off`, `bluetoothctl power on`
     (lasts until the next restart).
   - Re-pair once afterwards if the remote stored the old address.
-  - With a public host address, the remote reconnects on any button press.
+  - With privacy off and the remote paired again, its link dropped, it sat idle for 10 minutes, and one button press
+    reconnected it; btmon shows the host connecting from its public address. **Measured** (once so far)
 - On a MediaTek MT7925 controller the kernel logs "ACL packet for unknown connection handle 3837". It is a firmware
   debug event and harmless. **Reported**
 

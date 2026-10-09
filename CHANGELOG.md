@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Tested on hardware (A1962, Linux 6.17, BlueZ 5.72, MediaTek MT7925): `list`, `monitor` and `lab` find, unlock and
+  read the remote as a normal user through the udev rule, and the remote reconnects after it sleeps once LE privacy
+  is off (docs/PROTOCOL.md). Not yet tested on hardware: `keys` (uinput).
+
 ## 0.1.0 (2026-10-09)
 
 First release, extracted from a private TV-launcher project.
