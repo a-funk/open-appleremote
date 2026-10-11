@@ -151,24 +151,35 @@ would need a 28-byte report, longer than the 20 bytes `hog` passes on: unknown.
 of the first finger (|dx| + |dy|): 18 in state 4, 48 in state 5, 37 in state 6, 48 into state 3 from state 1 or 2.
 **Measured**. The gesture engine drops `SETTLE` frames after landing and `GUARD` frames before the lift for this.
 
-## Voice: research, not decodable through hidraw
+## Voice: Opus frames, cut short by BlueZ before hidraw
 
-While Siri is held, and briefly after, reports `fc 10 BB ...` arrive every 20 ms. **Measured**. Through hidraw each
-is cut to 21 bytes (the report ID plus the 20 bytes of the report map), so most of every audio frame is lost. A
-decoder needs the full GATT notifications: a raw GATT client instead of `hog`. See the prior art below.
+While Siri is held, and for about a second after release, the remote streams audio at 50 frames a second.
+**Measured**
 
-| byte | seen | Guess |
+The remote sends every frame whole, as a Handle Value Notification on ATT handle `0x0023` with a 101-byte value,
+even though it answers BlueZ's MTU request with 23 (BlueZ asks for 517). bluetoothd reads each ATT PDU into a buffer
+of the MTU, 23 bytes, so hog and hidraw get only the first 20 bytes of the value: the 21-byte `fc 10 ...` reports,
+each holding 13 bytes of Opus. **Measured** (btmon, 5 Siri presses, BlueZ 5.72; on the air each PDU is 104 bytes, in
+four 27-byte LE fragments)
+
+So the voice can't be decoded from hidraw. The full frames are visible at the HCI layer, through btmon or an
+`HCI_CHANNEL_MONITOR` socket, which needs CAP_NET_RAW. **Measured**. A second GATT client wouldn't help, because BlueZ
+delivers its notifications through the same 23-byte reads. A bluetoothd that read ATT PDUs into a larger buffer would
+pass them whole. **Guess**
+
+| value byte | hidraw byte | content |
 |---|---|---|
-| 2 | `0x10` while Siri is held, `0x00` after release | buttons |
-| 3-4 | varies | unknown, perhaps a level |
-| 5 | +1 per report (259 of 261 pairs); restarts at each press | sequence number |
-| 6 | always 0 | high byte of the sequence? |
-| 7 | 67 to 94 | frame length |
-| 8 | always `0xB8` | Opus TOC byte: config 23 (CELT-only, wideband, 20 ms), mono, one frame, which fits the 20 ms spacing |
-| 9-20 | | the first 12 bytes of that frame |
+| 0 | 1 | `0x10`: audio |
+| 1 | 2 | buttons: `0x10` while Siri is held, `0x00` in the tail after release |
+| 2-3 | 3-4 | level, little-endian. It tracks the decoded frame's loudness |
+| 4-5 | 5-6 | sequence number, little-endian. 0 at each stream start, +1 per frame |
+| 6 | 7 | NN: the length of the Opus packet, TOC included (67 to 94) |
+| 7 to 6+NN | 8 to 20 | the Opus packet. TOC `0xB8`: config 23 (CELT-only, wideband, 20 ms), mono, one frame |
+| the rest | | filler |
 
-Short `fc 10 BB` reports without payload also appear around Siri presses (3 in the sample). The sample contains no
-audio reports: they carry the speaker's voice.
+Every frame decodes with libopus at 16 kHz: 320 samples, 20 ms. **Measured**. A stream ends with 2-byte values,
+`10 00` or `10 10`, which are the short `fc 10 BB` reports through hidraw. The sample capture contains no audio
+reports, because they carry the speaker's voice.
 
 ## Sleep, wake and reconnect
 

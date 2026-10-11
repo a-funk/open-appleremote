@@ -5,6 +5,8 @@
 - Tested on hardware (A1962, Linux 6.17, BlueZ 5.72, MediaTek MT7925): `list`, `monitor` and `lab` find, unlock and
   read the remote as a normal user through the udev rule, and the remote reconnects after it sleeps once LE privacy
   is off (docs/PROTOCOL.md). Not yet tested on hardware: `keys` (uinput).
+- Docs: the voice section was wrong about where the audio is cut. The remote sends whole 101-byte frames, and
+  bluetoothd's 23-byte ATT reads cut them before hidraw. It now has the frame layout, measured with btmon.
 
 ## 0.1.0 (2026-10-09)
 

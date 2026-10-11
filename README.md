@@ -105,7 +105,8 @@ time, which is what a replay plays.
 - `touch`: `t` is seconds on the remote's own clock, `x` and `y` the first finger (+X right, +Y up, about 1650
   units across), `fingers` every finger as `[x, y, state]`.
 - `buttons`: `mask` is the buttons held; names are `tv`, `volup`, `voldown`, `playpause`, `siri`, `menu`, `click`.
-- `voicechunk`: an audio report while Siri is held (research: it can't be decoded through hidraw).
+- `voicechunk`: an audio report while Siri is held. Through hidraw it holds only the start of an Opus frame
+  ([docs/PROTOCOL.md](docs/PROTOCOL.md#voice-opus-frames-cut-short-by-bluez-before-hidraw)).
 - `gesture`: `touch` (down or up), `move` (a focus step: `src` is `slide` or `flick`), `tilt` (a resting finger
   leaning the focused tile, -1 to 1).
 
@@ -152,7 +153,9 @@ The gesture engine's feel (step size, pacing, flick speed, coasting) is set by t
 
 ## Limitations
 
-- Voice is not decoded. hidraw cuts the audio reports short; decoding needs a raw GATT client.
+- Voice is not decoded. The remote sends whole Opus frames, but BlueZ keeps only the first 20 bytes of each before
+  hidraw sees it, so decoding needs the HCI layer (btmon, or an HCI monitor socket). See
+  [docs/PROTOCOL.md](docs/PROTOCOL.md#voice-opus-frames-cut-short-by-bluez-before-hidraw).
 - After a long sleep, the button press that wakes the remote may be lost.
 - If the remote won't reconnect after sleeping, BlueZ is probably using LE privacy: set `Privacy = off` in
   `/etc/bluetooth/main.conf` (details in [docs/PROTOCOL.md](docs/PROTOCOL.md#sleep-wake-and-reconnect)).
