@@ -13,7 +13,8 @@
     gives up its capabilities (and root, under sudo; as plain root it won't run) before it waits for the remote or
     reads a packet.
   - `appleremote/voice.py` assembles each press by sequence number, fills lost frames with libopus's concealment, and
-    decodes through libopus (ctypes; optional, loaded only to decode: `libopus0`).
+    decodes through libopus (ctypes; optional, loaded only to decode: `libopus0`; on macOS only from absolute paths,
+    Homebrew's and MacPorts' included).
   - `voice` keeps the remote unlocked through hidraw, as `monitor` does (`device.keep_unlocked()`): the remote sends
     no voice until it is. The WAVs are 0600, in a 0700 directory; a press with no frame held (the tail of a Siri press
     that woke the remote) gets none.

@@ -489,6 +489,21 @@ class Voice(unittest.TestCase):
                 main(["voice", "--replay", os.path.join(d, "c.snoop"), "--out", d])
             self.assertIn("libopus0", str(e.exception.code))
 
+    def test_libopus_on_macos(self):
+        # absolute paths only: macOS's dlopen (and find_library) try a bare or relative name in the current directory
+        tried = []
+
+        def cdll(name):
+            tried.append(name)
+            raise OSError(name)
+        for found in ("libopus.dylib", "/usr/local/opt/opus/lib/libopus.0.dylib", None):
+            del tried[:]
+            with mock.patch.object(voice, "_lib", None), mock.patch.object(sys, "platform", "darwin"), \
+                    mock.patch("ctypes.util.find_library", lambda name: found), mock.patch("ctypes.CDLL", cdll), \
+                    self.assertRaises(RuntimeError):
+                voice.libopus()
+            self.assertEqual(tried, ([found] if found and found.startswith("/") else []) + list(voice.MAC_OPUS))
+
     def test_saves_private_wavs(self):
         # a WAV per press, yours alone (decode mocked: no libopus needed); none for a press with no frame held, as
         # what's left of a Siri press that woke the remote

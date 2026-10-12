@@ -15,6 +15,7 @@ through ctypes when something is first decoded. Nothing else in the package need
 """
 import ctypes
 import ctypes.util
+import os
 import select
 import socket
 import struct
@@ -27,6 +28,8 @@ from . import hcitap
 RATE, FRAME, TOC = 16000, 320, 0xB8  # 16 kHz, 20 ms a frame
 MAX_FRAMES = 3000                    # a minute; a longer press goes on in the next Press
 GAP = .5                             # s without a frame that end a press whose end marker never came
+MAC_OPUS = ("/opt/homebrew/lib/libopus.0.dylib", "/usr/local/lib/libopus.0.dylib",  # Homebrew (Apple silicon, Intel)
+            "/opt/local/lib/libopus.0.dylib")                                       # and MacPorts
 _lib = None
 
 
@@ -154,19 +157,31 @@ def libopus():
     """libopus with the prototypes used here, loaded on first use; RuntimeError, naming the package, without it."""
     global _lib
     if _lib is None:
-        name = "libopus.so.0" if sys.platform.startswith("linux") else ctypes.util.find_library("opus") or "libopus"
-        vp, i, P = ctypes.c_void_p, ctypes.c_int, ctypes.POINTER
-        try:
-            lib = ctypes.CDLL(name)
-            for fn, res, args in (("opus_decoder_create", vp, [ctypes.c_int32, i, P(i)]),
-                                  ("opus_decode", i, [vp, ctypes.c_char_p, ctypes.c_int32, P(ctypes.c_int16), i, i]),
-                                  ("opus_decoder_destroy", None, [vp])):
-                f = getattr(lib, fn)
-                f.restype, f.argtypes = res, args
-        except (OSError, AttributeError) as e:
-            raise RuntimeError("decoding the voice needs libopus: sudo apt install libopus0 (Debian, Ubuntu), "
-                               "sudo dnf install opus (Fedora), brew install opus (macOS)") from e
-        _lib = lib
+        if sys.platform.startswith("linux"):
+            names = ["libopus.so.0"]                      # (an ELF loader never looks in the current directory)
+        elif sys.platform == "darwin":
+            # macOS's dlopen and find_library do, for a bare or relative name: only absolute paths here
+            names = [p for p in (ctypes.util.find_library("opus"),) + MAC_OPUS if p and os.path.isabs(p)]
+        else:
+            names = [ctypes.util.find_library("opus") or "libopus.so.0"]
+        vp, i, P, err = ctypes.c_void_p, ctypes.c_int, ctypes.POINTER, None
+        protos = (("opus_decoder_create", vp, [ctypes.c_int32, i, P(i)]),
+                  ("opus_decode", i, [vp, ctypes.c_char_p, ctypes.c_int32, P(ctypes.c_int16), i, i]),
+                  ("opus_decoder_destroy", None, [vp]))
+        for name in names:
+            try:
+                lib = ctypes.CDLL(name)
+                for fn, res, args in protos:
+                    f = getattr(lib, fn)
+                    f.restype, f.argtypes = res, args
+                _lib = lib
+                break
+            except (OSError, AttributeError) as e:
+                err = e
+        else:
+            raise RuntimeError("decoding the voice needs libopus (looked for %s): sudo apt install libopus0 (Debian, "
+                               "Ubuntu), sudo dnf install opus (Fedora), brew install opus (macOS)"
+                               % ", ".join(names)) from err
     return _lib
 
 
