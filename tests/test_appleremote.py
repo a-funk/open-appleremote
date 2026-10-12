@@ -10,6 +10,7 @@ import json
 import math
 import os
 import random
+import select
 import socket
 import stat
 import struct
@@ -21,7 +22,7 @@ import unittest
 import wave
 from unittest import mock
 
-from appleremote import gestures, hcitap, voice
+from appleremote import device, gestures, hcitap, voice
 from appleremote.__main__ import main, pump
 from appleremote.decode import Decoder
 from appleremote.device import REMOTE, hidiocsfeature, replay
@@ -235,6 +236,20 @@ def quiet():
     return contextlib.redirect_stderr(io.StringIO())
 
 
+def connect(path):
+    """A client of the tap serving on `path`, once it listens (Linux: SOCK_SEQPACKET)."""
+    for _ in range(500):
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        c.settimeout(5)
+        try:
+            c.connect(path)
+            return c
+        except (FileNotFoundError, ConnectionRefusedError):
+            c.close()
+            time.sleep(.01)
+    raise AssertionError("nothing listens on " + path)
+
+
 class HciTap(unittest.TestCase):
     def tap(self, remote=R, links=()):
         return hcitap.Tap(remote, links, info=lambda s: None)
@@ -354,6 +369,37 @@ class HciTap(unittest.TestCase):
             self.assertTrue(v is None or v[0] == 0x10 and (len(v) == 2 or len(v) == 101 and v[7] == 0xB8), (i, p.hex()))
         self.assertEqual(run(t, [le_conn(0x300), enc(0x300)] + notify(f0, 0x300)), [f0])
 
+    def test_giving_up_privileges(self):
+        # dumpable goes off before the capabilities (no moment when a process of this uid could take the socket); as
+        # plain root, with no sudo to go back from, nothing is given up: it refuses
+        calls, libc = [], mock.Mock()
+        libc.prctl.side_effect = lambda *a: calls.append(("prctl",) + a) or 0
+        libc.capset.side_effect = lambda *a: calls.append("capset") or 0
+        with mock.patch("ctypes.CDLL", return_value=libc), mock.patch.object(os, "getuid", return_value=1000):
+            hcitap.unprivileged()
+        self.assertEqual(calls, [("prctl", 4, 0, 0, 0, 0), "capset"])  # PR_SET_DUMPABLE 0
+        del calls[:]
+        with mock.patch("ctypes.CDLL", return_value=libc), mock.patch.object(os, "getuid", return_value=0), \
+                mock.patch.dict(os.environ, {"SUDO_UID": ""}), self.assertRaises(PermissionError) as e:
+            hcitap.unprivileged()
+        self.assertEqual(calls, [])
+        self.assertIn("with sudo", str(e.exception))
+
+    def test_wait(self):
+        # without --remote: what the monitor gets until the remote's hidraw node shows up is dropped unparsed, then
+        # the kernel's link list, read after that, says which link is the remote's; a closed monitor ends the wait
+        feed, mon = socket.socketpair()
+        found = iter([None, None, R])
+        with feed, mon, mock.patch.object(hcitap, "WAIT", 0), mock.patch.object(hcitap, "address", lambda: next(found)), \
+                mock.patch.object(hcitap, "links", lambda: [(0, 0x41, bdaddr(R), True)]):
+            for p in [le_conn(0x200), enc(0x200)] + notify(frame(0)):
+                feed.send(p)
+            t = hcitap.wait(mon, info=lambda s: None)
+            self.assertEqual((t.link, t.enc, select.select([mon], [], [], 0)[0]), ({(0, 0x41): True}, {(0, 0x41)}, []))
+            feed.close()
+            with self.assertRaises(OSError):
+                hcitap.wait(mon, info=lambda s: None)
+
 
 class Voice(unittest.TestCase):
     def test_parse(self):
@@ -442,6 +488,20 @@ class Voice(unittest.TestCase):
             with tempfile.TemporaryDirectory() as d, self.assertRaises(SystemExit) as e:
                 main(["voice", "--replay", os.path.join(d, "c.snoop"), "--out", d])
             self.assertIn("libopus0", str(e.exception.code))
+
+    def test_saves_private_wavs(self):
+        # a WAV per press, yours alone (decode mocked: no libopus needed); none for a press with no frame held, as
+        # what's left of a Siri press that woke the remote
+        with tempfile.TemporaryDirectory() as d:
+            cap, out = os.path.join(d, "c.snoop"), os.path.join(d, "wav")
+            snoop(cap, [p for v in [frame(q, held=False) for q in range(6, 10)] + [END] + [frame(q) for q in range(5)]
+                        + [END] for p in notify(v)])
+            with mock.patch.object(voice, "libopus", lambda: None), contextlib.redirect_stdout(io.StringIO()) as o, \
+                    mock.patch.object(voice, "decode", lambda pk: bytes(2 * voice.FRAME * len(pk))):
+                main(["voice", "--replay", cap, "--out", out])
+            got = [json.loads(x) for x in o.getvalue().splitlines()]
+            self.assertEqual([(g["held"], g["wav"]) for g in got], [(0, None), (5, os.path.join(out, "c-02.wav"))])
+            self.assertEqual([stat.S_IMODE(os.stat(p).st_mode) for p in (out, got[1]["wav"])], [0o700, 0o600])
 
 
 def encode(pcm, bitrate=32000, cap=94):
@@ -556,18 +616,32 @@ class LinuxTap(unittest.TestCase):
 
     def test_live(self):  # the CLI's live path, a socketpair standing in for the monitor (nothing drops privileges here)
         feed, mon = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-        for p in [le_conn(0x200), enc(0x200)] + [p for v in [frame(q) for q in range(3)] + [END] for p in notify(v)]:
-            feed.send(p)
-        feed.close()
+        order = []
+
+        def address():  # the remote shows up, and only then sends: 3 frames and an end marker
+            order.append("look")
+            for p in [le_conn(0x200), enc(0x200)] + [p for v in [frame(q) for q in range(3)] + [END] for p in notify(v)]:
+                feed.send(p)
+            feed.close()
+            return R
         with contextlib.ExitStack() as stack:
-            for name, fake in (("monitor", lambda: mon), ("links", lambda: []), ("unprivileged", lambda: None)):
-                stack.enter_context(mock.patch.object(hcitap, name, fake))
+            for obj, name, fake in ((hcitap, "monitor", lambda: order.append("open") or mon),
+                                    (hcitap, "unprivileged", lambda: order.append("drop")), (hcitap, "address", address),
+                                    (hcitap, "links", lambda: []),
+                                    (device, "keep_unlocked", lambda info: order.append("unlock"))):
+                stack.enter_context(mock.patch.object(obj, name, fake))
             out = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             stack.enter_context(quiet())
             with self.assertRaises(SystemExit) as e:
-                main(["voice", "--remote", R])
+                main(["voice", "--remote", "AA:BB:CC"])
+            self.assertEqual((order, "not a Bluetooth address" in str(e.exception.code)), ([], True))  # nothing opened
+            with self.assertRaises(SystemExit) as e:
+                main(["voice"])
         self.assertIn("monitor socket closed", str(e.exception.code))
         self.assertEqual(json.loads(out.getvalue())["frames"], 3)
+        # the monitor opens and every privilege goes before it waits for the remote; the thread that unlocks the remote
+        # starts only then
+        self.assertEqual(order, ["open", "drop", "unlock", "look"])
 
     def test_links(self):  # the kernel's list, as a user, or no Bluetooth here; never ENOTTY (a wrong ioctl)
         try:
@@ -582,7 +656,11 @@ class LinuxTap(unittest.TestCase):
             path, mark, f = os.path.join(tmp, "run", "voice.sock"), [0x700], [frame(i) for i in range(3)]
             feed, mon = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)  # stands in for the monitor socket
             tap = hcitap.Tap(R, info=lambda s: None)
-            th = threading.Thread(target=hcitap.serve, args=(mon, tap, path, os.getuid()), daemon=True)
+
+            def serve(mon, tap, path, uid):  # as serve_forever() does, with a Tap made here
+                with hcitap.listening(path, uid) as lst:
+                    hcitap.serve(mon, tap, lst, uid)
+            th = threading.Thread(target=serve, args=(mon, tap, path, os.getuid()), daemon=True)
             th.start()
 
             def say(*packets):
@@ -598,36 +676,24 @@ class LinuxTap(unittest.TestCase):
                     time.sleep(.01)
                 self.fail("serve() stalled")
 
-            def client(p=path):
-                for _ in range(500):  # until it listens
-                    c = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-                    c.settimeout(5)
-                    try:
-                        c.connect(p)
-                        return c
-                    except (FileNotFoundError, ConnectionRefusedError):
-                        c.close()
-                        time.sleep(.01)
-                self.fail("nothing listens on " + p)
-
             def refused(p=path):  # it connects, then the tap closes it at once
-                with client(p) as c:
+                with connect(p) as c:
                     return c.recv(200) == b""
 
             say(le_conn(0x200), enc(0x200), *notify(f[0]))
             handled()  # no client then: dropped, not kept for later
-            a = client()
+            a = connect(path)
             self.assertEqual((stat.S_IMODE(os.stat(path).st_mode), stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode)),
                              (0o600, 0o700))
             say(*notify(END))
             self.assertEqual(a.recv(200)[8:], END)
-            b, t0 = client(), time.monotonic_ns()
+            b, t0 = connect(path), time.monotonic_ns()
             say(*notify(f[1]))
             for c in (a, b):  # both; b nothing from before it connected
                 m = c.recv(200)
                 self.assertEqual(m[8:], f[1])
                 self.assertTrue(t0 <= struct.unpack("<Q", m[:8])[0] <= time.monotonic_ns())
-            s, c = client(), client()  # 4 clients: a fifth is refused
+            s, c = connect(path), connect(path)  # 4 clients: a fifth is refused
             self.assertTrue(refused())
             for _ in range(2000):  # s never reads: once its queue is full it is dropped; the others get every message
                 say(*notify(END))
@@ -636,19 +702,23 @@ class LinuxTap(unittest.TestCase):
             while s.recv(200):  # what was queued for s, then its end
                 n += 1
             self.assertTrue(0 < n < 2000, n)
-            x = voice.client(path, idle=.05)  # its place is free again: voice.client() takes it
+            a.send(b"x")  # a client that sends is dropped (closed with that unread: a reset)
+            with self.assertRaises(ConnectionResetError):
+                a.recv(200)
+            x = voice.client(path, idle=.05)  # a place is free again: voice.client() takes it
             self.assertIsNone(next(x)[1])
             say(*[p for v in [frame(q) for q in range(3)] + [END] for p in notify(v)])
             p = next(voice.presses(x))
             self.assertEqual((p.seqs, p.ended), ([0, 1, 2], True))
             f2, m2 = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
             p2 = os.path.join(tmp, "other.sock")
-            th2 = threading.Thread(target=hcitap.serve, args=(m2, hcitap.Tap(R, info=lambda s: None), p2,
-                                                              os.getuid() + 1), daemon=True)
+            th2 = threading.Thread(target=serve, args=(m2, hcitap.Tap(R, info=lambda s: None), p2, os.getuid() + 1),
+                                   daemon=True)
             th2.start()
-            self.assertTrue(refused(p2))  # a process of another uid is refused
+            self.assertTrue(refused(p2))  # for another uid's processes (the unit's): this one is refused,
+            self.assertEqual(stat.S_IMODE(os.stat(p2).st_mode), 0o666)  # though the socket lets anyone connect
             f2.close()
-            feed.close()  # the monitor closed: serve() ends, and removes its socket
+            feed.close()  # the monitor closed: serve() ends, and the socket is removed
             for t in (th, th2):
                 t.join(5)
                 self.assertFalse(t.is_alive())
@@ -658,9 +728,47 @@ class LinuxTap(unittest.TestCase):
                 y.close()
             keep = os.path.join(tmp, "keep")  # a file that isn't a socket is never replaced, nor removed
             open(keep, "w").close()
-            with self.assertRaises(OSError):
-                hcitap.serve(mon, tap, keep, os.getuid())
+            with self.assertRaises(OSError), hcitap.listening(keep, os.getuid()):
+                pass
             self.assertTrue(os.path.isfile(keep))
+
+    def test_serve_forever(self):
+        # the socket is there before the remote is (a client waits with the tap), what the monitor gets meanwhile is
+        # dropped, and once the remote's hidraw node shows up its voice comes through; the socket goes with the monitor
+        with tempfile.TemporaryDirectory() as tmp:
+            path, there, up, looks = os.path.join(tmp, "voice.sock"), threading.Event(), threading.Event(), []
+            feed, mon = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+            f = [frame(i) for i in range(2)]
+
+            def address():
+                looks.append(1)
+                return R if there.is_set() else None
+
+            def run():
+                with contextlib.suppress(OSError):  # (its end: the monitor closed)
+                    hcitap.serve_forever(mon, None, path, os.getuid(), lambda s: s.startswith("the remote is") and up.set())
+            with contextlib.ExitStack() as stack:
+                for name, fake in (("WAIT", .01), ("address", address), ("links", lambda: [(0, 0x41, bdaddr(R), True)]),
+                                   ("signal", mock.Mock())):  # (a thread can't set a signal handler)
+                    stack.enter_context(mock.patch.object(hcitap, name, fake))
+                th = threading.Thread(target=run, daemon=True)
+                th.start()
+                c = connect(path)
+                for p in [le_conn(0x200), enc(0x200)] + notify(f[0]):
+                    feed.send(p)
+                n, end = len(looks), time.monotonic() + 5
+                while len(looks) < n + 2 and time.monotonic() < end:  # a look begun after these were sent, then a
+                    time.sleep(.01)                                      # drop: they are gone
+                there.set()
+                self.assertTrue(up.wait(5))
+                for p in notify(f[1], 0x41):
+                    feed.send(p)
+                self.assertEqual(c.recv(200)[8:], f[1])
+                feed.close()
+                th.join(5)
+            self.assertFalse(th.is_alive() or os.path.exists(path))
+            c.close()
+            mon.close()
 
 
 if __name__ == "__main__":

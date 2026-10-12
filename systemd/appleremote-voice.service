@@ -1,15 +1,20 @@
 # Example system unit: the remote's voice tap, serving its whole voice frames to your user's apps on
 # /run/appleremote/voice.sock. Read them as your user with:
 #   python3 -m appleremote voice --socket /run/appleremote/voice.sock --out DIR
+# The tap never touches hidraw, so it can't unlock the remote, which sends no voice until it is unlocked: that command
+# does it (so do keys, lab and monitor), as your user through the udev rule.
 #
 # Why a system unit: the tap reads the kernel's HCI monitor, which needs CAP_NET_RAW and shows every Bluetooth
 # device's traffic. Here the capability goes only to a root-owned copy of appleremote/hcitap.py (standard library
-# only), run as your user, and the tap gives it up once the monitor is open. No process of yours can change the code
-# that gets it. Never setcap the Python interpreter instead: every Python script on the machine would get it.
+# only), which gives it up once the monitor is open; no process of yours can change that code. It runs as a user of
+# its own (DynamicUser=), not as you: a process of yours could kill a tap of your uid and, where
+# kernel.yama.ptrace_scope is 0, take its open monitor socket as it exits. --allow-uid names the one user whose
+# processes it serves (checked with SO_PEERCRED). Never setcap the Python interpreter instead: every Python script on
+# the machine would get the capability.
 #
-# Install, from the repository's top directory (YOUR_USER becomes you):
+# Install, from the repository's top directory (YOUR_UID becomes your user id):
 #   sudo install -D -m 0644 appleremote/hcitap.py /usr/local/lib/open-appleremote/hcitap.py
-#   sed "s/YOUR_USER/$USER/" systemd/appleremote-voice.service |
+#   sed "s/YOUR_UID/$(id -u)/" systemd/appleremote-voice.service |
 #     sudo tee /etc/systemd/system/appleremote-voice.service
 #   sudo systemctl daemon-reload && sudo systemctl enable --now appleremote-voice
 # Logs:    journalctl -u appleremote-voice -f
@@ -22,13 +27,14 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
-User=YOUR_USER
-# -I -S: nothing of your environment, user site-packages or .pth files gets the capability
-ExecStart=/usr/bin/python3 -I -S /usr/local/lib/open-appleremote/hcitap.py --serve /run/appleremote/voice.sock
-# Without --remote it waits for the remote to connect, then reads its address from its hidraw node. To give the
-# address instead, add --remote AA:BB:CC:DD:EE:FF to ExecStart.
+DynamicUser=yes
+# -I -S: nothing of the environment, site-packages or .pth files gets the capability
+ExecStart=/usr/bin/python3 -I -S /usr/local/lib/open-appleremote/hcitap.py --serve /run/appleremote/voice.sock --allow-uid YOUR_UID
+# Without --remote it waits for the remote to connect, then reads its address from its hidraw node; the socket is
+# there meanwhile. To give the address instead, add --remote AA:BB:CC:DD:EE:FF to ExecStart.
 RuntimeDirectory=appleremote
-RuntimeDirectoryMode=0700
+# Your user must reach the socket: the directory 0755, the socket 0666, and the tap refuses every other uid
+RuntimeDirectoryMode=0755
 Restart=on-failure
 RestartSec=5
 AmbientCapabilities=CAP_NET_RAW

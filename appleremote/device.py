@@ -11,6 +11,7 @@ import json
 import os
 import select
 import sys
+import threading
 import time
 
 REMOTE = "0005:0000004C:0000026D"  # HID_ID: Bluetooth, Apple, gen-1 Siri Remote (tested: A1962)
@@ -80,6 +81,16 @@ def reports(path=None, idle=0.01, info=None):
             time.sleep(1)
         finally:
             os.close(fd)
+
+
+def keep_unlocked(info=None):
+    """Keep the remote unlocked, as reports() does on every connect, on a daemon thread that drops its reports. For a
+    reader of the voice through hcitap.py, which gets the frames below hidraw and can't unlock the remote: without
+    this (or keys, lab or monitor running) the remote sends no voice."""
+    def run():
+        for _ in reports(idle=1, info=info):
+            pass
+    threading.Thread(target=run, daemon=True).start()
 
 
 def replay(path, realtime=False, idle=0.01):

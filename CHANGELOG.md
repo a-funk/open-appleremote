@@ -10,17 +10,22 @@
 - Voice: `python3 -m appleremote voice` saves each Siri press as a 16 kHz WAV and prints a JSON line per press.
   - `appleremote/hcitap.py` reads the whole frames from the kernel's HCI monitor (it needs `CAP_NET_RAW`). It keeps
     only the remote's own encrypted link and its voice frames, drops everything else before buffering any of it, and
-    gives up its capabilities (and root, under sudo) before it reads a packet.
+    gives up its capabilities (and root, under sudo; as plain root it won't run) before it waits for the remote or
+    reads a packet.
   - `appleremote/voice.py` assembles each press by sequence number, fills lost frames with libopus's concealment, and
     decodes through libopus (ctypes; optional, loaded only to decode: `libopus0`).
+  - `voice` keeps the remote unlocked through hidraw, as `monitor` does (`device.keep_unlocked()`): the remote sends
+    no voice until it is. The WAVs are 0600, in a 0700 directory; a press with no frame held (the tail of a Siri press
+    that woke the remote) gets none.
   - `--serve PATH` serves the frames to other apps on a unix socket; `--socket PATH` reads them from one; `--replay`
     decodes a btmon capture on any OS.
-  - `systemd/appleremote-voice.service`: a sandboxed system unit that runs a root-owned copy of the tap as your user
-    with `CAP_NET_RAW` alone.
+  - `systemd/appleremote-voice.service`: a sandboxed system unit that runs a root-owned copy of the tap as a user of
+    its own (`DynamicUser=`) with `CAP_NET_RAW` alone, serving your user's processes (`--allow-uid`). Its socket is
+    there from the start; clients wait with it for the remote.
   - The lab shows the voice reports' level and sequence number while Siri is held; hidraw has no more of the audio.
-  - Tested on synthetic frames, on replayed captures (the recorded gen-1 frames of Jack-R1/SiriRemoteVoiceDecoder;
-    pairing, reconnect and gamepad traces, from which it keeps nothing) and in Linux containers; not yet live on
-    hardware.
+  - Tested on synthetic frames, on Jack-R1/SiriRemoteVoiceDecoder's recorded gen-1 frames wrapped in a synthetic btmon
+    capture, on real pairing, reconnect and gamepad captures (no voice: it keeps nothing of them), and in Linux
+    containers, the unit under systemd 257 with a socket standing in for the monitor; not yet live on hardware.
 
 ## 0.1.0 (2026-10-09)
 

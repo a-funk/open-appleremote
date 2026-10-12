@@ -134,29 +134,39 @@ def run_lab(args, source):
 def run_voice(args):
     from . import hcitap, voice
     try:
-        if args.serve:
-            return hcitap.serve_forever(args.remote, args.serve)
         if args.out:
             voice.libopus()
         if args.replay:
             source, name = voice.replay(args.replay, args.remote), os.path.splitext(os.path.basename(args.replay))[0]
         else:
-            source = voice.client(args.socket) if args.socket else hcitap.frames(args.remote)
+            if args.remote:
+                hcitap._addr(args.remote)                 # (a ValueError before anything opens)
+            mon = None if args.socket else hcitap.start()  # the HCI monitor, then no privilege left
+            # only now: a thread started before the drop would keep the capability
+            device.keep_unlocked(lambda s: print("hidraw: " + s, file=sys.stderr, flush=True))
+            if args.serve:
+                return hcitap.serve_forever(mon, args.remote, args.serve)
+            source = voice.client(args.socket) if args.socket else hcitap.frames(mon, args.remote)
             name = time.strftime("siri-%Y%m%d-%H%M%S")
         n = 0
         for n, press in enumerate(voice.presses(source), 1):
             pk, wav = press.packets(), None
-            if args.out:
-                os.makedirs(args.out, exist_ok=True)  # (only now: under sudo, it runs as the user again by then)
+            if args.out and press.held:                   # (none held: what's left of the press that woke the remote)
+                pcm = voice.decode(pk)
+                os.makedirs(args.out, 0o700, exist_ok=True)  # (only now: under sudo, it runs as the user again by then)
                 wav = os.path.join(args.out, "%s-%02d.wav" % (name, n))
-                voice.write_wav(wav, voice.decode(pk))
+                with os.fdopen(os.open(wav, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as f:
+                    voice.write_wav(f, pcm)
             print(json.dumps({"kind": "press", "wav": wav, "frames": len(pk), "lost": pk.count(None),
                               "held": press.held, "seconds": round(len(pk) * .02, 2), "level": press.level,
                               "ended": press.ended}), flush=True)
+    except BrokenPipeError:                               # stdout's (piped into head): main() leaves quietly
+        raise
     except (OSError, RuntimeError, ValueError) as e:
         sys.exit("voice: %s" % e)
     if args.socket:
-        sys.exit("voice: the tap closed the connection (it serves %d clients at most)" % hcitap.CLIENTS)
+        sys.exit("voice: the tap closed the connection: it stopped, or it refused this client (another user's, or one "
+                 "past the %d it serves)" % hcitap.CLIENTS)
     if not n:
         sys.exit("voice: no voice found in %s (if the remote connected during the capture, give --remote)"
                  % args.replay)
@@ -187,9 +197,11 @@ def main(argv=None):
     p = sub.add_parser("voice", help="save each Siri press as a WAV, from the remote's whole voice frames",
                        description="Save each Siri press as a WAV (16 kHz mono), printing a JSON line per press. "
                        "hidraw gets only the start of each voice frame, so this reads them from the kernel's HCI "
-                       "monitor, which needs CAP_NET_RAW: run it with sudo (it goes back to your user once the monitor "
-                       "is open), or install systemd/appleremote-voice.service and use --socket. Decoding needs "
-                       "libopus (libopus0). README.md, Voice, says what it keeps and drops.")
+                       "monitor, which needs CAP_NET_RAW: run it with sudo python3 -B (it goes back to your user once "
+                       "the monitor is open), or install systemd/appleremote-voice.service and use --socket. It also "
+                       "keeps the remote unlocked through its hidraw node, as your user (udev/71-appleremote.rules): "
+                       "the remote sends no voice until it is. Decoding needs libopus (libopus0). README.md, Voice, "
+                       "says what it keeps and drops.")
     p.add_argument("--remote", metavar="ADDR", help="the remote's Bluetooth address, AA:BB:CC:DD:EE:FF (default: the "
                    "connected gen-1 Siri Remote's, from its hidraw node; with --replay, needed only if the remote "
                    "connected during the capture)")

@@ -183,8 +183,9 @@ came after its link's Encryption Change, so a tap that waits for the encryption 
 | the rest | | filler |
 
 Every frame decodes with libopus at 16 kHz: 320 samples, 20 ms. **Measured**. A stream ends with 2-byte values,
-`10 00` or `10 10`, which are the short `fc 10 BB` reports through hidraw. The sample capture contains no audio
-reports, because they carry the speaker's voice.
+`10 00` or `10 10`, which are the short `fc 10 BB` reports through hidraw. When a Siri press wakes the remote, only
+part of its stream comes: once, seq 6 to 9 (Siri let go) and `10 00`, before the host had unlocked the remote.
+**Reported**. The sample capture contains no audio reports, because they carry the speaker's voice.
 
 ## Sleep, wake and reconnect
 

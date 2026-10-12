@@ -6,7 +6,8 @@ channel, which btmon reads, has every frame whole. It also has everything else t
 keyboard input, pairing keys, every other device's traffic. So this file, the only code here that ever holds the
 capability, keeps the remote's voice and nothing else:
 
-- It opens the monitor, then gives up every capability (and root, under sudo) before it reads a packet.
+- It opens the monitor, then gives up every capability (and root, under sudo; as plain root it won't run) before it
+  waits for the remote or reads a packet.
 - It reassembles ACL data only from the remote's own link, once that link is encrypted: the link whose LE connect named
   the remote's address or, for one up before the tap started, the one the kernel's connection list names. A frame's
   layout is public and an address can be borrowed, but the encryption takes the remote's bond.
@@ -15,12 +16,14 @@ capability, keeps the remote's voice and nothing else:
   or an end marker (2 bytes: 0x10). It logs the remote's connects and dropped voice streams, never an address or a
   payload.
 
-It imports only the standard library, so it also runs alone, as systemd/appleremote-voice.service runs a root-owned
-copy of it:
-    python3 -I -S hcitap.py --serve /run/appleremote/voice.sock [--remote AA:BB:CC:DD:EE:FF]
+It never touches hidraw, so it can't unlock the remote, which sends no voice until it is: whoever reads the voice does
+that (device.keep_unlocked()). It imports only the standard library, so it also runs alone, as
+systemd/appleremote-voice.service runs a root-owned copy of it, as a user of its own:
+    python3 -I -S hcitap.py --serve /run/appleremote/voice.sock --allow-uid UID [--remote AA:BB:CC:DD:EE:FF]
 python3 -m appleremote voice runs it in-process (README, Voice); appleremote/voice.py decodes what it keeps.
 """
 import argparse
+import contextlib
 import errno
 import glob
 import os
@@ -36,6 +39,7 @@ HID_ID = "0005:0000004C:0000026D"  # the gen-1 Siri Remote's hidraw node, as dev
 ATT_NOTIFY = b"\x1b\x23\x00"       # ATT Handle Value Notification on handle 0x0023: HID report 0xFC
 SIZES = (5, 104)                   # L2CAP payloads kept: ATT_NOTIFY + a 2-byte end marker or a 101-byte voice frame
 CLIENTS = 4                        # serve(): the most readers at once
+WAIT = 1                           # wait(): s between looks for the remote's hidraw node
 # _IOR('H', 210 | 212, int). ponytail: asm-generic ioctl layout (x86, ARM, RISC-V); powerpc, mips, sparc differ
 HCIGETDEVLIST, HCIGETCONNLIST = 0x800448D2, 0x800448D4
 
@@ -201,9 +205,12 @@ def links():
 
 
 def unprivileged():
-    """Give up every capability, and under sudo root too (back to the user who ran it), then turn dumpable off so no
-    process of that user can trace this one and take its socket. A bound monitor socket keeps working: the kernel
-    checks CAP_NET_RAW only at bind. Capabilities are per thread: call it before starting any."""
+    """Give up every capability, and under sudo root too (back to the user who ran it); as plain root (su, a root
+    shell or unit) refuse, as there is no user to go back to. Dumpable goes off before the capabilities do, so no
+    process of this uid can trace this one and take its socket while it runs. As it exits the kernel checks dumpable
+    no more (a process's memory goes before its files): there only kernel.yama.ptrace_scope >= 1 keeps a process of
+    the same uid out, or another uid (the unit's DynamicUser=). A bound monitor socket keeps working: the kernel checks
+    CAP_NET_RAW only at bind. Capabilities are per thread: call it before starting any."""
     import ctypes
     libc = ctypes.CDLL(None, use_errno=True)
     if os.getuid() == 0 and os.environ.get("SUDO_UID"):
@@ -211,24 +218,18 @@ def unprivileged():
         os.initgroups(os.environ["SUDO_USER"], gid)
         os.setgid(gid)
         os.setuid(int(os.environ["SUDO_UID"]))           # (root to a user: every capability goes too)
+    if os.getuid() == 0:
+        raise OSError(errno.EPERM, "not as root: run it with sudo (it goes back to your user), or as a user with "
+                      "CAP_NET_RAW (systemd/appleremote-voice.service)")
     head = ctypes.create_string_buffer(struct.pack("=Ii", 0x20080522, 0))  # _LINUX_CAPABILITY_VERSION_3, this thread
-    if libc.capset(head, bytes(24)) or libc.prctl(4, 0, 0, 0, 0):         # every set empty; PR_SET_DUMPABLE 0
+    if libc.prctl(4, 0, 0, 0, 0) or libc.capset(head, bytes(24)):         # PR_SET_DUMPABLE 0, then every set empty
         err = ctypes.get_errno()
         raise OSError(err, "giving up privileges: " + os.strerror(err))
 
 
-def start(remote=None, info=None):
-    """Open the HCI monitor for the remote's voice -> (monitor socket, Tap). Needs CAP_NET_RAW, which it gives up at
-    once (unprivileged()). remote: its address; None: the connected gen-1 Siri Remote's, waiting until one is."""
-    say, told = info or _say, False
-    while remote is None:
-        remote = address()
-        if remote is None:
-            if not told:
-                say("waiting for the remote: press a button on it, or give its address (--remote)")
-                told = True
-            time.sleep(1)
-    _addr(remote)                                         # (a ValueError before anything opens)
+def start():
+    """Open the HCI monitor -> its socket. It needs CAP_NET_RAW, and gives up every privilege (unprivileged()) before
+    it returns, so before anything waits for the remote or reads a packet."""
     try:
         mon = monitor()
     except OSError as e:
@@ -236,25 +237,43 @@ def start(remote=None, info=None):
                       "sudo, or see systemd/appleremote-voice.service)" if e.errno == errno.EPERM else ""))
     try:
         unprivileged()
-        return mon, Tap(remote, links(), say)            # (after the bind: no link falls between the two)
     except BaseException:
         mon.close()
         raise
+    return mon
 
 
-def frames(remote=None, idle=.25, info=None):
-    """Live, from start(remote): (time.monotonic(), value) for each of the remote's voice values, and (time, None)
-    when `idle` s pass without one."""
-    mon, tap = start(remote, info)
-    tap.say("listening: hold Siri on the remote and speak")
+def wait(mon, remote=None, info=None):
+    """-> the Tap for the remote's voice on mon (start()'s). remote: its address; None: the connected gen-1 Siri
+    Remote's, waiting until there is one, while what mon gets meanwhile is dropped unparsed. The kernel's link list is
+    read after the last drop, so no link falls between the two."""
+    say, told = info or _say, False
+    while remote is None:
+        while select.select([mon], [], [], 0)[0]:
+            if not mon.recv(4096):
+                raise OSError("the HCI monitor socket closed")
+        remote = address()
+        if remote is None:
+            if not told:
+                say("waiting for the remote: press a button on it, or give its address (--remote)")
+                told = True
+            time.sleep(WAIT)
+    return Tap(remote, links(), say)
+
+
+def frames(mon, remote=None, idle=.25, info=None):
+    """From mon (start()'s), with the Tap wait() makes: (time.monotonic(), value) for each of the remote's voice
+    values, and (time, None) when `idle` s pass without one. It closes mon when it ends."""
     with mon:
+        tap = wait(mon, remote, info)
+        tap.say("listening: hold Siri on the remote and speak")
         last = time.monotonic()
         while True:
             v = None
             if select.select([mon], [], [], idle)[0]:
                 p = mon.recv(4096)
                 if not p:
-                    raise OSError(errno.EPIPE, "the HCI monitor socket closed")
+                    raise OSError("the HCI monitor socket closed")
                 v = tap.packet(p)
             now = time.monotonic()
             if v is not None or now - last >= idle:
@@ -262,29 +281,39 @@ def frames(remote=None, idle=.25, info=None):
                 yield now, v
 
 
-def serve(mon, tap, path, uid):
-    """Until `mon` closes: send each value `tap` keeps to every client of the unix socket `path`. Clients are processes
-    of `uid` (SO_PEERCRED), CLIENTS at most, and never send. Each message (SOCK_SEQPACKET) is the CLOCK_MONOTONIC ns
-    when the value came (8 bytes, little-endian), then the value: a 101-byte voice frame or a 2-byte end marker. A
-    client that can't take a message at once is dropped; with no client, values are dropped."""
+@contextlib.contextmanager
+def listening(path, uid):
+    """A unix socket (SOCK_SEQPACKET) listening on `path` for serve(), removed when done. It is 0600 from the start,
+    or 0666 when the clients' uid isn't this process's (the unit's), with serve()'s SO_PEERCRED check as the gate. Only
+    a stale socket at `path` (a killed run's) is replaced: anything else stays, and bind fails. A missing directory is
+    made 0700; an existing one is left as it is."""
     d = os.path.dirname(os.path.abspath(path))
     if not os.path.isdir(d):
         os.makedirs(d, 0o700)
-    try:
+    with contextlib.suppress(FileNotFoundError):
         if stat.S_ISSOCK(os.lstat(path).st_mode):
-            os.unlink(path)                               # a killed run's; anything else there stays, and bind fails
-    except FileNotFoundError:
-        pass
-    lst, clients, mask = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET), [], os.umask(0o177)
+            os.unlink(path)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as lst:
+        mask = os.umask(0o177 if uid == os.getuid() else 0o111)
+        try:
+            lst.bind(path)
+        finally:
+            os.umask(mask)
+        try:
+            lst.listen(CLIENTS)
+            yield lst
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
+
+
+def serve(mon, tap, lst, uid):
+    """Until `mon` closes: send each value `tap` keeps to every client of `lst` (listening()). Clients are processes
+    of `uid` (SO_PEERCRED), CLIENTS at most; they only read, and one that sends is dropped. Each message is the
+    CLOCK_MONOTONIC ns when the value came (8 bytes, little-endian), then the value: a 101-byte voice frame or a 2-byte
+    end marker. A client that can't take a message at once is dropped; with no client, values are dropped."""
+    clients = []
     try:
-        lst.bind(path)                                    # 0600 from the start (the umask)
-    except OSError:
-        lst.close()
-        raise
-    finally:
-        os.umask(mask)
-    try:
-        lst.listen(CLIENTS)
         while True:
             ready = select.select([lst, mon] + clients, [], [])[0]
             if lst in ready:                              # before the packet below, which a client that's in gets
@@ -315,22 +344,20 @@ def serve(mon, tap, path, uid):
                             clients.remove(c)
                             c.close()
     finally:
-        for c in clients + [lst]:
+        for c in clients:
             c.close()
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
 
 
-def serve_forever(remote, path, info=None):
-    """start(remote), then serve() the remote's voice on `path` until SIGTERM, or an OSError."""
-    mon, tap = start(remote, info)
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # (so serve() removes its socket)
-    with mon:
-        tap.say("serving the remote's voice on %s" % path)
-        serve(mon, tap, path, os.getuid())
-    raise OSError(errno.EPIPE, "the HCI monitor socket closed")
+def serve_forever(mon, remote, path, uid=None, info=None):
+    """Serve the remote's voice from mon (start()'s) on the unix socket `path` until SIGTERM, or an OSError. The socket
+    is there at once: its clients wait with it for the remote (wait()). uid: whose processes may read it (default:
+    this process's own)."""
+    say, uid = info or _say, os.getuid() if uid is None else uid
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # (so the socket is removed)
+    with mon, listening(path, uid) as lst:
+        say("serving the remote's voice on %s" % path)
+        serve(mon, wait(mon, remote, say), lst, uid)
+    raise OSError("the HCI monitor socket closed")
 
 
 def main(argv=None):
@@ -340,9 +367,13 @@ def main(argv=None):
     ap.add_argument("--remote", metavar="ADDR", help="the remote's Bluetooth address (default: the connected gen-1 "
                     "Siri Remote's, from its hidraw node)")
     ap.add_argument("--serve", metavar="PATH", required=True, help="the unix socket to serve on")
+    ap.add_argument("--allow-uid", metavar="UID", type=int, help="the user whose processes may read it (default: the "
+                    "tap's own; systemd/appleremote-voice.service runs the tap as a user of its own, and names yours)")
     a = ap.parse_args(argv)
     try:
-        serve_forever(a.remote, a.serve)
+        if a.remote:
+            _addr(a.remote)                               # (a ValueError before anything opens)
+        serve_forever(start(), a.remote, a.serve, a.allow_uid)
     except (OSError, ValueError) as e:
         return "hcitap: %s" % e
 

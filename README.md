@@ -11,8 +11,8 @@ into events, gestures or key presses. [docs/PROTOCOL.md](docs/PROTOCOL.md) docum
 
 Status: 0.1.0, an early release, tested on an A1962 with Linux: finding, unlocking and reading the remote as a normal
 user, and reconnecting after it sleeps. The virtual keyboard (`keys`) is not hardware-tested yet, and the voice
-(`voice`, not released yet) is tested only on synthetic frames and replayed captures. Reports are welcome (see
-[CHANGELOG.md](CHANGELOG.md)).
+(`voice`, not released yet) hasn't run live: it is tested on synthetic captures, one of them built from another
+project's recorded gen-1 frames. Reports are welcome (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## Quick start
 
@@ -49,7 +49,7 @@ python3 -m appleremote list        # finds the remote's hidraw node
 python3 -m appleremote monitor     # decoded events, one JSON object per line
 python3 -m appleremote gestures    # tvOS-style moves, tilts and buttons
 python3 -m appleremote lab         # live web lab: open http://127.0.0.1:8791
-sudo python3 -m appleremote voice --out voice/   # each Siri press as a WAV file: see Voice
+sudo python3 -B -m appleremote voice --out voice/   # each Siri press as a WAV file: see Voice
 ```
 
 The lab listens on 127.0.0.1 only. On a headless machine, forward it with `ssh -L 8791:127.0.0.1:8791 <host>` and
@@ -138,11 +138,11 @@ The gesture engine's feel (step size, pacing, flick speed, coasting) is set by t
 ## Voice
 
 Hold Siri and speak: `voice` saves each press as a WAV file (16 kHz, mono) for whisper or any other speech
-recognizer, and prints a line per press. A quick try, on Linux:
+recognizer, and prints a line per press. A quick try, on Linux, with the udev rule of Quick start in place:
 
 ```sh
-sudo apt install libopus0                          # the decoder (Debian, Ubuntu); nothing else needs it
-sudo python3 -m appleremote voice --out voice/     # Ctrl-C to stop
+sudo apt install libopus0                           # the decoder (Debian, Ubuntu); nothing else needs it
+sudo python3 -B -m appleremote voice --out voice/   # Ctrl-C to stop; -B: no root-owned __pycache__ in your clone
 ```
 
 ```json
@@ -152,12 +152,19 @@ sudo python3 -m appleremote voice --out voice/     # Ctrl-C to stop
 `frames` counts the press's 20 ms Opus frames: while Siri is held, then about a second more after you let go. `lost`
 counts frames that never arrived (libopus fills them in), `held` the frames sent with Siri held, `level` is the
 highest loudness the remote reported, and `ended` says whether the stream's end marker came. Without `--out` it only
-prints the lines.
+prints the lines. The WAV files are yours alone (0600, in a directory made 0700). A press with no frame held gets no
+WAV (`"wav": null`): a Siri press that wakes the remote loses its first frames before the link is up, and what arrives
+of it is only its tail. Wake the remote with another button.
 
 **Why sudo.** The remote sends each frame whole, but BlueZ keeps only its first 20 bytes before hidraw
 ([docs/PROTOCOL.md](docs/PROTOCOL.md#voice-opus-frames-cut-short-by-bluez-before-hidraw)), so `voice` reads the frames
 below BlueZ, from the kernel's HCI monitor (what btmon reads). Opening it needs `CAP_NET_RAW`. Under sudo, `voice`
-opens it, then goes back to your user, with no capability left, before it reads a packet; the WAV files are yours.
+opens it, then goes back to your user, with no capability left, before it waits for the remote or reads a packet; the
+WAV files are yours. As plain root (`su`, a root shell) it refuses: there would be no user to go back to.
+
+**It keeps the remote unlocked.** The remote sends nothing, its voice included, until it is unlocked through its
+hidraw node, again on every connect ([docs/PROTOCOL.md](docs/PROTOCOL.md#unlock)). `voice` does that as your user, as
+`monitor` does, so it needs the udev rule; when it can't open the node, it says so (`hidraw: cannot open ...`).
 
 **What it keeps.** The HCI monitor shows every Bluetooth device's traffic on the machine: keyboard input, pairing
 keys, headsets. [appleremote/hcitap.py](appleremote/hcitap.py), the only code that opens it (standard library only,
@@ -168,29 +175,37 @@ short enough to read before you run it), keeps the remote's voice and nothing el
 - of that, only voice frames and end markers (notifications on ATT handle `0x0023`);
 - everything else is dropped as it is parsed, before any of it is buffered. It never logs a payload or an address.
 
+Under sudo, the tap runs as your user: your other processes can't attach to it while it runs, but where
+`kernel.yama.ptrace_scope` is 0 one of them could kill it and take its open monitor socket as it exits. That is
+enough for a try. To keep it running, use the unit below, which runs the tap as a user of its own.
+
 **Finding the remote.** `voice` reads the address BlueZ gives the remote's hidraw node, so it waits until the remote
 is connected (press a button). If it keeps waiting, give the address: `--remote AA:BB:CC:DD:EE:FF`
 (`bluetoothctl devices Paired` lists it).
 
 **To keep it running** without sudo, [systemd/appleremote-voice.service](systemd/appleremote-voice.service) runs a
-root-owned copy of `hcitap.py` as your user, with `CAP_NET_RAW` alone (`AmbientCapabilities=`, `NoNewPrivileges=` and
-a tight sandbox), serving the frames on `/run/appleremote/voice.sock`. Its first lines say how to install it. Then, as
-your user:
+root-owned copy of `hcitap.py` as a user of its own (`DynamicUser=`), with `CAP_NET_RAW` alone (`AmbientCapabilities=`,
+`NoNewPrivileges=` and a tight sandbox), serving the frames to your user's processes on `/run/appleremote/voice.sock`.
+Its first lines say how to install it. Then, as your user:
 
 ```sh
 python3 -m appleremote voice --socket /run/appleremote/voice.sock --out voice/
 ```
 
-Don't give the capability to the Python interpreter (`setcap cap_net_raw+ep /usr/bin/python3`): every Python script on
-the machine would get it.
+The socket is there as soon as the unit runs, and `voice` waits with the tap for the remote. The tap never touches
+hidraw, so it can't unlock the remote: `voice --socket` does. Don't give the capability to the Python interpreter
+(`setcap cap_net_raw+ep /usr/bin/python3`): every Python script on the machine would get it.
 
-**Other apps.** `--serve PATH` serves the frames on a unix socket instead of decoding them, as the unit does (mode
-0600, your user's processes only, 4 at most). Each message is the `CLOCK_MONOTONIC` time in nanoseconds (8 bytes,
-little-endian), then the frame (101 bytes) or an end marker (2 bytes). From Python:
+**Other apps.** `--serve PATH` serves the frames instead of decoding them, as the unit does: a `SOCK_SEQPACKET` unix
+socket, for your user's processes only (checked with `SO_PEERCRED`), 4 at most. Clients only read; one that sends
+anything is dropped. Each message is the `CLOCK_MONOTONIC` time in nanoseconds (8 bytes, little-endian), then a frame
+(101 bytes) or an end marker (2 bytes). `voice --serve` keeps the remote unlocked; with the unit, your app must. From
+Python:
 
 ```python
-from appleremote import voice
+from appleremote import device, voice
 
+device.keep_unlocked()  # the remote sends no voice until it is unlocked
 for press in voice.presses(voice.client("/run/appleremote/voice.sock")):
     voice.write_wav("press.wav", voice.decode(press.packets()))
 ```
