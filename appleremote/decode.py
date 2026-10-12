@@ -4,7 +4,7 @@ Every report has ID 0xFC. Byte 1 says what follows, byte 2 holds the buttons tha
 
     fc 00 BB                                buttons only
     fc NN BB 32 CC CC SS + NN x 7 bytes     NN fingers on the touch surface; CC CC is the remote's clock
-    fc 10 BB ...                            audio while Siri is held (research: not decodable through hidraw)
+    fc 10 BB ...                            audio while Siri is held: each frame cut short (voice.py has them whole)
 
 docs/PROTOCOL.md has the full layout, and says what is measured and what is a guess.
 """

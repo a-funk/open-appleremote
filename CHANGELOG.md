@@ -7,6 +7,20 @@
   is off (docs/PROTOCOL.md). Not yet tested on hardware: `keys` (uinput).
 - Docs: the voice section was wrong about where the audio is cut. The remote sends whole 101-byte frames, and
   bluetoothd's 23-byte ATT reads cut them before hidraw. It now has the frame layout, measured with btmon.
+- Voice: `python3 -m appleremote voice` saves each Siri press as a 16 kHz WAV and prints a JSON line per press.
+  - `appleremote/hcitap.py` reads the whole frames from the kernel's HCI monitor (it needs `CAP_NET_RAW`). It keeps
+    only the remote's own encrypted link and its voice frames, drops everything else before buffering any of it, and
+    gives up its capabilities (and root, under sudo) before it reads a packet.
+  - `appleremote/voice.py` assembles each press by sequence number, fills lost frames with libopus's concealment, and
+    decodes through libopus (ctypes; optional, loaded only to decode: `libopus0`).
+  - `--serve PATH` serves the frames to other apps on a unix socket; `--socket PATH` reads them from one; `--replay`
+    decodes a btmon capture on any OS.
+  - `systemd/appleremote-voice.service`: a sandboxed system unit that runs a root-owned copy of the tap as your user
+    with `CAP_NET_RAW` alone.
+  - The lab shows the voice reports' level and sequence number while Siri is held; hidraw has no more of the audio.
+  - Tested on synthetic frames, on replayed captures (the recorded gen-1 frames of Jack-R1/SiriRemoteVoiceDecoder;
+    pairing, reconnect and gamepad traces, from which it keeps nothing) and in Linux containers; not yet live on
+    hardware.
 
 ## 0.1.0 (2026-10-09)
 

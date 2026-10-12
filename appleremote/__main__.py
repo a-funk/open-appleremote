@@ -1,8 +1,9 @@
-"""python3 -m appleremote {list,monitor,gestures,keys,lab}: each command has --help; README.md walks through them."""
+"""python3 -m appleremote {list,monitor,gestures,keys,lab,voice}: each has --help; README.md walks through them."""
 import argparse
 import json
 import os
 import sys
+import time
 
 from . import device
 from .decode import Decoder, Touch
@@ -130,6 +131,37 @@ def run_lab(args, source):
     server.serve_forever()
 
 
+def run_voice(args):
+    from . import hcitap, voice
+    try:
+        if args.serve:
+            return hcitap.serve_forever(args.remote, args.serve)
+        if args.out:
+            voice.libopus()
+        if args.replay:
+            source, name = voice.replay(args.replay, args.remote), os.path.splitext(os.path.basename(args.replay))[0]
+        else:
+            source = voice.client(args.socket) if args.socket else hcitap.frames(args.remote)
+            name = time.strftime("siri-%Y%m%d-%H%M%S")
+        n = 0
+        for n, press in enumerate(voice.presses(source), 1):
+            pk, wav = press.packets(), None
+            if args.out:
+                os.makedirs(args.out, exist_ok=True)  # (only now: under sudo, it runs as the user again by then)
+                wav = os.path.join(args.out, "%s-%02d.wav" % (name, n))
+                voice.write_wav(wav, voice.decode(pk))
+            print(json.dumps({"kind": "press", "wav": wav, "frames": len(pk), "lost": pk.count(None),
+                              "held": press.held, "seconds": round(len(pk) * .02, 2), "level": press.level,
+                              "ended": press.ended}), flush=True)
+    except (OSError, RuntimeError, ValueError) as e:
+        sys.exit("voice: %s" % e)
+    if args.socket:
+        sys.exit("voice: the tap closed the connection (it serves %d clients at most)" % hcitap.CLIENTS)
+    if not n:
+        sys.exit("voice: no voice found in %s (if the remote connected during the capture, give --remote)"
+                 % args.replay)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python3 -m appleremote",
                                  description="Use a gen-1 Apple Siri Remote (A1513/A1962) on Linux, over Bluetooth LE.")
@@ -152,6 +184,22 @@ def main(argv=None):
             p.add_argument("--map", metavar="FILE", help='JSON overrides of the key map, e.g. {"click": "KEY_SPACE"}')
         if name == "lab":
             p.add_argument("--port", type=int, default=8791, help="port on 127.0.0.1 (default 8791)")
+    p = sub.add_parser("voice", help="save each Siri press as a WAV, from the remote's whole voice frames",
+                       description="Save each Siri press as a WAV (16 kHz mono), printing a JSON line per press. "
+                       "hidraw gets only the start of each voice frame, so this reads them from the kernel's HCI "
+                       "monitor, which needs CAP_NET_RAW: run it with sudo (it goes back to your user once the monitor "
+                       "is open), or install systemd/appleremote-voice.service and use --socket. Decoding needs "
+                       "libopus (libopus0). README.md, Voice, says what it keeps and drops.")
+    p.add_argument("--remote", metavar="ADDR", help="the remote's Bluetooth address, AA:BB:CC:DD:EE:FF (default: the "
+                   "connected gen-1 Siri Remote's, from its hidraw node; with --replay, needed only if the remote "
+                   "connected during the capture)")
+    p.add_argument("--out", metavar="DIR", help="save each press as a WAV in DIR (without it: the JSON lines only)")
+    src = p.add_mutually_exclusive_group()
+    src.add_argument("--replay", metavar="FILE", help="decode a btmon -w capture instead (any OS)")
+    src.add_argument("--socket", metavar="PATH", help="read the frames from a tap serving on PATH (--serve, "
+                     "systemd/appleremote-voice.service) instead of opening the HCI monitor")
+    src.add_argument("--serve", metavar="PATH", help="serve the remote's voice frames to other apps on a unix socket "
+                     "(0600, your user's processes only) instead of decoding them")
     args = ap.parse_args(argv)
 
     def source(info=None):
@@ -169,8 +217,12 @@ def main(argv=None):
                 print("no paired Apple Bluetooth HID device found: see README.md, Quick start", file=sys.stderr)
             return 0 if found else 1
         if not args.replay and not sys.platform.startswith("linux"):
-            ap.exit(2, "live mode needs Linux (hidraw); elsewhere try --replay tests/sample.jsonl\n")
-        if args.cmd == "monitor":
+            need = (("the HCI monitor", "decode a btmon capture with --replay") if args.cmd == "voice" else
+                    ("hidraw", "try --replay tests/sample.jsonl"))
+            ap.exit(2, "live mode needs Linux (%s); elsewhere %s\n" % need)
+        if args.cmd == "voice":
+            run_voice(args)
+        elif args.cmd == "monitor":
             pump(source(), printer({"report", "touch", "buttons", "voicechunk"}), raw=args.raw)
         elif args.cmd == "gestures":
             pump(source(), printer({"gesture", "buttons"}), gestures=True)

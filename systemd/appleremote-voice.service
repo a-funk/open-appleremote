@@ -1,0 +1,67 @@
+# Example system unit: the remote's voice tap, serving its whole voice frames to your user's apps on
+# /run/appleremote/voice.sock. Read them as your user with:
+#   python3 -m appleremote voice --socket /run/appleremote/voice.sock --out DIR
+#
+# Why a system unit: the tap reads the kernel's HCI monitor, which needs CAP_NET_RAW and shows every Bluetooth
+# device's traffic. Here the capability goes only to a root-owned copy of appleremote/hcitap.py (standard library
+# only), run as your user, and the tap gives it up once the monitor is open. No process of yours can change the code
+# that gets it. Never setcap the Python interpreter instead: every Python script on the machine would get it.
+#
+# Install, from the repository's top directory (YOUR_USER becomes you):
+#   sudo install -D -m 0644 appleremote/hcitap.py /usr/local/lib/open-appleremote/hcitap.py
+#   sed "s/YOUR_USER/$USER/" systemd/appleremote-voice.service |
+#     sudo tee /etc/systemd/system/appleremote-voice.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now appleremote-voice
+# Logs:    journalctl -u appleremote-voice -f
+# Update:  the copy doesn't follow your checkout: run the install line again, then restart the unit
+# Remove:  sudo systemctl disable --now appleremote-voice, then delete both files
+
+[Unit]
+Description=Apple Siri Remote voice tap (open-appleremote)
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+User=YOUR_USER
+# -I -S: nothing of your environment, user site-packages or .pth files gets the capability
+ExecStart=/usr/bin/python3 -I -S /usr/local/lib/open-appleremote/hcitap.py --serve /run/appleremote/voice.sock
+# Without --remote it waits for the remote to connect, then reads its address from its hidraw node. To give the
+# address instead, add --remote AA:BB:CC:DD:EE:FF to ExecStart.
+RuntimeDirectory=appleremote
+RuntimeDirectoryMode=0700
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+UMask=0077
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+# Bluetooth sockets exist only in the host's network namespace, so no PrivateNetwork=; AF_UNIX serves the frames
+RestrictAddressFamilies=AF_BLUETOOTH AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# ctypes needs libffi 3.4 or newer under this; on an older distribution, remove the line if the unit fails at start
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# capset is in @privileged: it is how the tap gives CAP_NET_RAW up
+SystemCallFilter=capset
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

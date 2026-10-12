@@ -12,6 +12,7 @@ h1{font-size:22px;margin:0 0 4px}.sub{color:var(--dim);margin:0 0 16px}
 .bit.on{background:var(--hot);color:#000;font-weight:700}
 #bytes{display:flex;flex-wrap:wrap;gap:4px;font:12px ui-monospace,monospace}#bytes span{min-width:38px;text-align:center;padding:5px 2px;border-radius:6px;background:#232328}
 #bytes span.ch{background:var(--acc);color:#fff}#bytes small{display:block;color:var(--dim);font-size:9px}
+.meter{height:14px;border-radius:7px;background:#232328;overflow:hidden}#vbar{height:100%;width:0;background:var(--hot);transition:width .06s}
 #log{height:300px;overflow:auto;font:12px/1.5 ui-monospace,monospace;white-space:pre;color:#c7c7cc}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}button{font:inherit;border:0;border-radius:10px;padding:8px 12px;background:#2c2c31;color:#fff;cursor:pointer}button:hover{background:#3a3a40}
 .pill{padding:4px 10px;border-radius:999px;background:#232328;color:var(--dim);font-size:13px}.pill.ok{color:var(--hot)}
@@ -33,6 +34,7 @@ h1{font-size:22px;margin:0 0 4px}.sub{color:var(--dim);margin:0 0 16px}
 <div class="row"><span class="pill" id="xy">–</span><span class="pill" id="state">state –</span><span class="pill" id="nf">fingers –</span></div></div>
 <div style="display:grid;gap:16px;align-content:start;min-width:0">
 <div class="card"><h2>Buttons (byte 2 of every report)</h2><div class="bits" id="bits"></div><div class="row"><span class="pill" id="btn">no press yet</span></div></div>
+<div class="card"><h2>Voice (hidraw has only each frame's start: level and sequence, no audio)</h2><div class="meter"><div id="vbar"></div></div><div class="row"><span class="pill" id="vst">Siri not held</span><span class="pill" id="vinfo">–</span></div></div>
 <div class="card"><h2>Latest report bytes (changed bytes in blue)</h2><div id="bytes"></div></div>
 <div class="card"><h2>Raw log</h2><div id="log"></div></div></div></div>
 <script>
@@ -67,6 +69,15 @@ function onButtons(ev){
   ev.pressed.forEach(p=>{ $('glast').textContent=LABEL[p]||p;
     if(p==='click'){ const q=lastTouch||{px:.5,py:.4}; firework(q.px,q.py);
       rowEl.children[fi].animate([{scale:1.2},{scale:1.06},{scale:1.2}],{duration:220,easing:'ease-out'}); } });}
+// --- voice: hidraw's 21-byte audio reports, fc 10 BB LL LL SS SS NN + the first 13 Opus bytes; fc 10 BB ends a stream ---
+let vAt=0;
+function voiceIdle(s){$('vst').textContent=s;$('vst').className='pill';$('vbar').style.width='0';}
+function onVoice(ev){ const b=ev.raw.match(/../g).map(h=>parseInt(h,16)); vAt=performance.now();
+  if(b.length<8){ voiceIdle('stream ended'); return; }
+  const level=b[3]|b[4]<<8, seq=b[5]|b[6]<<8;
+  $('vst').textContent=b[2]&16?'Siri held: streaming':'streaming the tail (Siri let go)'; $('vst').className='pill ok';
+  $('vbar').style.width=Math.min(100,level/250)+'%'; $('vinfo').textContent=`seq ${seq} · level ${level} · Opus ${b[7]} bytes, ${b.length-8} here`;}
+setInterval(()=>{ if(vAt&&performance.now()-vAt>500){ vAt=0; voiceIdle('Siri not held'); } },250);
 // --- feel test: the gesture engine's output on a tvOS-style row ---
 const TILES=[['Movies','#ff375f'],['TV Shows','#bf5af2'],['Music','#ff9f0a'],['Photos','#30d158'],['Podcasts','#5e5ce6'],
   ['Games','#ff453a'],['Radio','#64d2ff'],['Sports','#ffd60a'],['Library','#0a84ff'],['Settings','#8e8e93']];
@@ -106,7 +117,7 @@ function onGesture(ev){ const t=ev.type;
 const es=new EventSource('/events');
 es.onmessage=e=>{const ev=JSON.parse(e.data);
   if(ev.kind==='report') onReport(ev); else if(ev.kind==='touch') onTouch(ev); else if(ev.kind==='buttons') onButtons(ev);
-  else if(ev.kind==='gesture') onGesture(ev);
+  else if(ev.kind==='gesture') onGesture(ev); else if(ev.kind==='voicechunk') onVoice(ev);
   else if(ev.kind==='info'){ log('· '+ev.text); $('st').textContent=ev.text.length>60?ev.text.slice(0,57)+'…':ev.text; $('st').className=/^(connected|replaying)/.test(ev.text)?'pill ok':'pill'; } };
 es.onerror=()=>{$('st').textContent='lab offline';$('st').className='pill';};
 draw();

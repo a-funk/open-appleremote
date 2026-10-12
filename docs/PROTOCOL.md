@@ -167,6 +167,11 @@ So the voice can't be decoded from hidraw. The full frames are visible at the HC
 delivers its notifications through the same 23-byte reads. A bluetoothd that read ATT PDUs into a larger buffer would
 pass them whole. **Guess**
 
+`python3 -m appleremote voice` reads them there: [`appleremote/hcitap.py`](../appleremote/hcitap.py) keeps the
+remote's notifications on `0x0023` from its own encrypted link and drops everything else, and
+[`appleremote/voice.py`](../appleremote/voice.py) decodes them (README, Voice). In a btmon capture, every voice frame
+came after its link's Encryption Change, so a tap that waits for the encryption loses none. **Reported**
+
 | value byte | hidraw byte | content |
 |---|---|---|
 | 0 | 1 | `0x10`: audio |
